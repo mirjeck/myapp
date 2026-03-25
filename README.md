@@ -84,3 +84,36 @@ Join our community of developers creating universal apps.
 
 - [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
 - [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+
+hybrid-market-app-rn/
+├── App.tsx ← Provider chain entry point
+├── package.json ← Expo 52 + all deps
+├── app.json, babel.config.js, tsconfig.json
+└── src/
+├── config.ts ← WEB_BASE_URL, TABS map, heights
+├── navigation/
+│ ├── types.ts ← RootStackParamList
+│ └── AppNavigator.tsx ← Splash → Main stack
+├── auth/
+│ ├── storage.ts ← expo-secure-store wrapper
+│ └── AuthContext.tsx ← login/logout + token sync
+├── bridge/
+│ ├── types.ts ← WebToNativeMessage / NativeToWebMessage
+│ ├── BridgeHandler.ts ← Web→Native: parses & dispatches messages
+│ └── NativeBridge.ts ← Native→Web: injects JS into WebView
+├── webview/
+│ ├── injectedScripts.ts ← Before/after load JS (auth pre-hydration, history patch, \_\_handleNativeMessage)
+│ ├── WebViewManager.ts ← Singleton ref registry
+│ ├── WebViewContext.tsx ← Single global ref + shared state
+│ └── WebViewContainer.tsx ← React.memo'd single WebView instance
+├── components/
+│ ├── Header/index.tsx ← Native top bar (brand + wallet balance)
+│ ├── TabBar/index.tsx ← 5-tab native bar with cart badge + auth-guard
+│ ├── LoadingScreen/index.tsx ← Overlay spinner while WebView loads
+│ └── OfflineScreen/index.tsx ← Full-screen offline state + retry
+├── screens/
+│ ├── SplashScreen.tsx ← Brand splash during auth init
+│ └── MainScreen.tsx ← WebView + Header + TabBar overlays
+└── hooks/
+├── useNetworkStatus.ts ← NetInfo wrapper
+└── useWebViewRef.ts ← Access global WebView ref

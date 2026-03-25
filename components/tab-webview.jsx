@@ -1,21 +1,9 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
-import {
-  ActivityIndicator,
-  BackHandler,
-  Platform,
-  View,
-} from "react-native";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { ActivityIndicator, BackHandler, Platform, View } from "react-native";
 import { WebView } from "react-native-webview";
-
-import { useFocusEffect, useNavigation } from "@react-navigation/native";
-import { useRouter } from "expo-router";
+import { useFocusEffect } from "@react-navigation/native";
 import { openBrowserAsync } from "expo-web-browser";
-import { SafeAreaView } from "react-native-safe-area-context";
 
-const ONBOARDING_PHONE_URL = "http://192.168.68.127:80/";
-const WEBVIEW_URL = process.env.EXPO_PUBLIC_WEB_URL || ONBOARDING_PHONE_URL;
-
-// Zoom o'chirish uchun viewport meta tag
 const DISABLE_ZOOM_SCRIPT = `
 (function() {
   var meta = document.querySelector('meta[name="viewport"]');
@@ -27,11 +15,14 @@ const DISABLE_ZOOM_SCRIPT = `
     newMeta.content = 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no';
     document.head.appendChild(newMeta);
   }
+
+  var style = document.createElement('style');
+  style.textContent = '* { -webkit-user-select: none !important; user-select: none !important; }';
+  document.head.appendChild(style);
 })();
 true;
 `;
 
-// Auth token bridge: web → native (kelajakda kerak bo'lsa ishlatish uchun)
 const WEBVIEW_BRIDGE_SCRIPT = `
 (function () {
   function postTokens() {
@@ -76,105 +67,80 @@ function normalizeUrl(url) {
   }
 }
 
-export default function OnboardingPhoneScreen() {
-  const router = useRouter();
-  const navigation = useNavigation();
+export function TabWebView({ url }) {
   const webViewRef = useRef(null);
-  const [navState, setNavState] = useState({
-    canGoBack: false,
-    url: WEBVIEW_URL,
-  });
+  const [navState, setNavState] = useState({ canGoBack: false, url });
 
-  const normalizedHomeUrl = useMemo(() => normalizeUrl(WEBVIEW_URL), []);
+  const normalizedInitialUrl = useMemo(() => normalizeUrl(url), [url]);
   const normalizedCurrentUrl = useMemo(
     () => normalizeUrl(navState.url),
-    [navState.url],
+    [navState.url]
   );
   const canGoBackInWebView =
-    navState.canGoBack && normalizedCurrentUrl !== normalizedHomeUrl;
+    navState.canGoBack && normalizedCurrentUrl !== normalizedInitialUrl;
 
   const handleBackPress = useCallback(() => {
     if (canGoBackInWebView) {
       webViewRef.current?.goBack();
       return true;
     }
-
     if (Platform.OS === "android") {
       BackHandler.exitApp();
       return true;
     }
-
-    if (typeof router.canGoBack === "function" && router.canGoBack()) {
-      router.back();
-      return true;
-    }
-
     return true;
-  }, [canGoBackInWebView, router]);
+  }, [canGoBackInWebView]);
 
   const onNavigationStateChange = useCallback((nextNavState) => {
     setNavState({ canGoBack: nextNavState.canGoBack, url: nextNavState.url });
   }, []);
 
-  useLayoutEffect(() => {
-    navigation.setOptions({ headerShown: false });
-  }, [navigation]);
-
   useFocusEffect(
     useCallback(() => {
       if (Platform.OS !== "android") return;
-
       const sub = BackHandler.addEventListener(
         "hardwareBackPress",
-        handleBackPress,
+        handleBackPress
       );
       return () => sub.remove();
-    }, [handleBackPress]),
+    }, [handleBackPress])
   );
 
   const webOrigin = useMemo(() => {
     try {
-      return new URL(WEBVIEW_URL).origin;
+      return new URL(url).origin;
     } catch {
       return null;
     }
-  }, []);
+  }, [url]);
 
   const onShouldStartLoadWithRequest = useCallback(
     (request) => {
       const nextUrl = request?.url;
       if (!nextUrl) return true;
-
-      if (webOrigin && nextUrl.startsWith(webOrigin)) {
-        return true;
-      }
-
+      if (webOrigin && nextUrl.startsWith(webOrigin)) return true;
       openBrowserAsync(nextUrl).catch(() => {});
       return false;
     },
-    [webOrigin],
+    [webOrigin]
   );
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: "#fff" }}>
-      <WebView
-        ref={webViewRef}
-        source={{ uri: WEBVIEW_URL }}
-        onNavigationStateChange={onNavigationStateChange}
-        onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
-        injectedJavaScriptBeforeContentLoaded={WEBVIEW_BRIDGE_SCRIPT}
-        injectedJavaScript={DISABLE_ZOOM_SCRIPT}
-        scalesPageToFit={false}
-        setSupportMultipleWindows={false}
-        startInLoadingState
-        renderLoading={() => (
-          <View
-            style={{ flex: 1, alignItems: "center", justifyContent: "center" }}
-          >
-            <ActivityIndicator />
-          </View>
-        )}
-      />
-    </SafeAreaView>
+    <WebView
+      ref={webViewRef}
+      source={{ uri: url }}
+      onNavigationStateChange={onNavigationStateChange}
+      onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
+      injectedJavaScriptBeforeContentLoaded={WEBVIEW_BRIDGE_SCRIPT}
+      injectedJavaScript={DISABLE_ZOOM_SCRIPT}
+      scalesPageToFit={false}
+      setSupportMultipleWindows={false}
+      startInLoadingState
+      renderLoading={() => (
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+          <ActivityIndicator />
+        </View>
+      )}
+    />
   );
 }
