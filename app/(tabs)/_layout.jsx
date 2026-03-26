@@ -1,5 +1,5 @@
 import { Platform } from "react-native";
-import { Slot } from "expo-router";
+import { Slot, Tabs } from "expo-router";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import {
   Icon,
@@ -9,6 +9,15 @@ import {
 } from "expo-router/unstable-native-tabs";
 import { useIsTabBarVisible } from "@/lib/tab-bar-visibility";
 
+const IOS_NATIVE_TABS_MIN_VERSION = 26;
+
+function getIosMajorVersion() {
+  if (Platform.OS !== "ios") return 0;
+  if (typeof Platform.Version === "number") return Platform.Version;
+  const parsed = Number.parseInt(String(Platform.Version || "0"), 10);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 export default function TabsLayout() {
   const isTabBarVisible = useIsTabBarVisible();
 
@@ -16,15 +25,100 @@ export default function TabsLayout() {
     return <Slot />;
   }
 
-  if (!isTabBarVisible) {
-    return <Slot />;
+  if (getIosMajorVersion() < IOS_NATIVE_TABS_MIN_VERSION) {
+    return (
+      <Tabs
+        screenOptions={{
+          headerShown: false,
+          tabBarActiveTintColor: "#FE946E",
+          tabBarInactiveTintColor: "#757575",
+          tabBarStyle: {
+            backgroundColor: "#FFFFFF",
+            borderTopColor: "rgba(17, 24, 39, 0.10)",
+            display: isTabBarVisible ? "flex" : "none",
+          },
+          tabBarLabelStyle: {
+            fontSize: 11,
+            fontWeight: "600",
+          },
+        }}
+      >
+        <Tabs.Screen
+          name="index"
+          options={{
+            title: "Home",
+            tabBarIcon: ({ color, focused }) => (
+              <Ionicons
+                name={focused ? "home" : "home-outline"}
+                size={22}
+                color={color}
+              />
+            ),
+          }}
+        />
+        <Tabs.Screen
+          name="catalog"
+          options={{
+            title: "Catalog",
+            tabBarIcon: ({ color, focused }) => (
+              <Ionicons
+                name={focused ? "grid" : "grid-outline"}
+                size={22}
+                color={color}
+              />
+            ),
+          }}
+        />
+        <Tabs.Screen
+          name="cart"
+          options={{
+            title: "Cart",
+            tabBarIcon: ({ color, focused }) => (
+              <Ionicons
+                name={focused ? "bag" : "bag-outline"}
+                size={22}
+                color={color}
+              />
+            ),
+          }}
+        />
+        <Tabs.Screen
+          name="favorites"
+          options={{
+            title: "Favorites",
+            tabBarIcon: ({ color, focused }) => (
+              <Ionicons
+                name={focused ? "heart" : "heart-outline"}
+                size={22}
+                color={color}
+              />
+            ),
+          }}
+        />
+        <Tabs.Screen
+          name="profile"
+          options={{
+            title: "Profile",
+            tabBarIcon: ({ color, focused }) => (
+              <Ionicons
+                name={focused ? "person" : "person-outline"}
+                size={22}
+                color={color}
+              />
+            ),
+          }}
+        />
+      </Tabs>
+    );
   }
 
   return (
     <NativeTabs
+      hidden={!isTabBarVisible}
       disableTransparentOnScrollEdge
-      minimizeBehavior={Platform.OS === "ios" ? "onScrollDown" : undefined}
-      blurEffect={Platform.OS === "ios" ? "systemChromeMaterial" : undefined}
+      blurEffect="none"
+      backgroundColor="#FFFFFF"
+      shadowColor="rgba(17, 24, 39, 0.10)"
       iconColor={{ default: "#757575", selected: "#FE946E" }}
       labelStyle={{
         default: { color: "#757575", fontSize: 11, fontWeight: "500" },

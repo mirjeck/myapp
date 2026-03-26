@@ -17,18 +17,21 @@ import Animated, {
 import Svg, { Path } from "react-native-svg";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "@react-navigation/native";
-import { useRouter } from "expo-router";
+import { useRootNavigationState, useRouter } from "expo-router";
 import { openBrowserAsync } from "expo-web-browser";
 import * as Haptics from "expo-haptics";
 import { WebView } from "react-native-webview";
+import { NativeBottomSheet } from "@/components/native-bottom-sheet";
 
 import {
   clearStoredAuthTokens,
   getStoredAuthTokens,
   setStoredAuthTokens,
 } from "@/lib/auth-storage";
+import { setAuthStateCache } from "@/lib/auth-guard-bridge";
 import {
   isTabBarVisiblePath,
+  setTabBarForcedHidden,
   setCurrentWebPath,
 } from "@/lib/tab-bar-visibility";
 
@@ -36,6 +39,29 @@ const BASE_URL = (
   process.env.EXPO_PUBLIC_WEB_URL || "http://192.168.68.127:80"
 ).replace(/\/$/, "");
 const INITIAL_WEB_URL = `${BASE_URL}/`;
+const BOTTOM_SHEET_CLOSE_EVENT = "native:bottomSheetClose";
+const BOTTOM_SHEET_ACTION_EVENT = "native:bottomSheetAction";
+const NATIVE_SHEET_CLOSE_MS = 170;
+const ROUTE_GUARD_PATHS = new Set(["/cart", "/favorites", "/profile"]);
+const LOGIN_PATH_PREFIXES = ["/login", "/register", "/onboarding"];
+function authPromptDescription(path) {
+  if (path.startsWith("/cart")) return "Чтобы открыть корзину, авторизуйтесь.";
+  if (path.startsWith("/favorites")) {
+    return "Чтобы открыть избранное, авторизуйтесь.";
+  }
+  if (path.startsWith("/profile"))
+    return "Чтобы открыть профиль, авторизуйтесь.";
+  return "Чтобы продолжить, авторизуйтесь.";
+}
+
+function normalizeToTabPath(path) {
+  if (!path || path === "/home") return "/";
+  if (path.startsWith("/catalog")) return "/catalog";
+  if (path.startsWith("/cart")) return "/cart";
+  if (path.startsWith("/favorites")) return "/favorites";
+  if (path.startsWith("/profile")) return "/profile";
+  return "/";
+}
 
 const ROOT_PATHS = new Set([
   "/",
@@ -208,7 +234,7 @@ const DISABLE_ZOOM_SCRIPT = `
   }
 
   var style = document.createElement('style');
-  style.textContent = '* { -webkit-user-select: none !important; user-select: none !important; }';
+  style.textContent = '* { -webkit-user-select: none !important; user-select: none !important; } html, body { -ms-overflow-style: none !important; scrollbar-width: none !important; } html::-webkit-scrollbar, body::-webkit-scrollbar, *::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }';
   document.head.appendChild(style);
 })();
 true;
@@ -323,8 +349,10 @@ true;
 
 export function HybridShell({ routePath = "/" }) {
   const router = useRouter();
+  const rootNavigationState = useRootNavigationState();
   const webViewRef = useRef(null);
   const pendingPathRef = useRef(null);
+  const pendingNativeLoginPathRef = useRef(null);
 
   const [currentPath, setCurrentPath] = useState("/");
   const [canGoBack, setCanGoBack] = useState(false);
@@ -339,14 +367,23 @@ export function HybridShell({ routePath = "/" }) {
   const [brandTitle, setBrandTitle] = useState("Comfort Market");
   const [brandLogo, setBrandLogo] = useState(null);
   const [logoBroken, setLogoBroken] = useState(false);
+  const [nativeSheet, setNativeSheet] = useState(null);
+  const [isNativeSheetVisible, setIsNativeSheetVisible] = useState(false);
+  const nativeSheetCloseTimerRef = useRef(null);
+  const nativeSheetMetaRef = useRef(new Map());
+  const nativeGuardOpenRef = useRef(false);
+  const iosHomeRedirectTimerRef = useRef(null);
+  const authReturnPathRef = useRef(null);
 
   useEffect(() => {
     let mounted = true;
 
     getStoredAuthTokens().then((tokensString) => {
       if (!mounted) return;
+      const loggedIn = Boolean(tokensString);
       setBridgeScript(buildBridgeScript(tokensString, Platform.OS));
-      setIsLoggedIn(Boolean(tokensString));
+      setIsLoggedIn(loggedIn);
+      setAuthStateCache(loggedIn);
     });
 
     return () => {
@@ -354,10 +391,66 @@ export function HybridShell({ routePath = "/" }) {
     };
   }, []);
 
+  useEffect(
+    () => () => {
+      setTabBarForcedHidden(false);
+      if (nativeSheetCloseTimerRef.current) {
+        clearTimeout(nativeSheetCloseTimerRef.current);
+      }
+      if (iosHomeRedirectTimerRef.current) {
+        clearTimeout(iosHomeRedirectTimerRef.current);
+      }
+    },
+    [],
+  );
+
   const showHeader = useMemo(
     () => startsWithAny(currentPath, HEADER_VISIBLE_PATHS),
     [currentPath],
   );
+  const shouldShowInlineAuthGuard = useMemo(() => {
+    if (Platform.OS !== "ios") return false;
+    if (isLoggedIn) return false;
+    if (startsWithAny(currentPath, LOGIN_PATH_PREFIXES)) return false;
+    return ROUTE_GUARD_PATHS.has(normalizeToTabPath(routePath || "/"));
+  }, [currentPath, isLoggedIn, routePath]);
+
+  useEffect(() => {
+    if (Platform.OS !== "ios") return;
+    setTabBarForcedHidden(shouldShowInlineAuthGuard);
+    return () => {
+      setTabBarForcedHidden(false);
+    };
+  }, [shouldShowInlineAuthGuard]);
+
+  const goToNativeLoginScreen = useCallback(
+    (targetPath) => {
+      const normalized = normalizeToTabPath(targetPath || "/");
+      const returnPath = ROUTE_GUARD_PATHS.has(normalized) ? normalized : "/";
+      authReturnPathRef.current = returnPath;
+      setCurrentWebPath("/login/phone");
+      if (!rootNavigationState?.key) {
+        pendingNativeLoginPathRef.current = returnPath;
+        return;
+      }
+      router.push({
+        pathname: "/onboarding/phone",
+        params: { next: returnPath },
+      });
+    },
+    [rootNavigationState?.key, router],
+  );
+
+  useEffect(() => {
+    if (!rootNavigationState?.key) return;
+    const pendingPath = pendingNativeLoginPathRef.current;
+    if (!pendingPath) return;
+    pendingNativeLoginPathRef.current = null;
+    router.push({
+      pathname: "/onboarding/phone",
+      params: { next: pendingPath },
+    });
+  }, [rootNavigationState?.key, router]);
 
   useEffect(() => {
     setCurrentWebPath(currentPath);
@@ -396,12 +489,38 @@ export function HybridShell({ routePath = "/" }) {
     }
 
     if (Platform.OS === "android") {
+      if (startsWithAny(currentPath, LOGIN_PATH_PREFIXES)) {
+        const js = `
+          (function () {
+            try {
+              var nextPath = "/";
+              if (typeof window.__reactRouter_navigate === "function") {
+                window.__reactRouter_navigate(nextPath);
+              } else if (window.location.pathname !== nextPath) {
+                window.__pendingNativePath = nextPath;
+              }
+            } catch (e) {}
+            true;
+          })();
+        `;
+
+        if (isWebReady && webViewRef.current) {
+          webViewRef.current.injectJavaScript(js);
+          setCurrentPath("/");
+        } else {
+          pendingPathRef.current = "/";
+          setCurrentPath("/");
+        }
+        setCurrentWebPath("/");
+        return true;
+      }
+
       BackHandler.exitApp();
       return true;
     }
 
     return true;
-  }, [canGoBack, currentPath]);
+  }, [canGoBack, currentPath, isWebReady]);
 
   useFocusEffect(
     useCallback(() => {
@@ -452,6 +571,7 @@ export function HybridShell({ routePath = "/" }) {
 
       if (isWebReady && webViewRef.current) {
         webViewRef.current.injectJavaScript(js);
+        setCurrentPath(safePath);
       } else {
         pendingPathRef.current = safePath;
         setCurrentPath(safePath);
@@ -460,9 +580,88 @@ export function HybridShell({ routePath = "/" }) {
     [isWebReady],
   );
 
+  const openNativeAuthGuardSheet = useCallback(
+    (targetPath) => {
+      if (nativeGuardOpenRef.current) {
+        return;
+      }
+      nativeGuardOpenRef.current = true;
+      setTabBarForcedHidden(true);
+      authReturnPathRef.current = normalizeToTabPath(targetPath || "/");
+      if (webViewRef.current) {
+        webViewRef.current.injectJavaScript(`
+          (function () {
+            try {
+              window.localStorage.setItem('lastPath', ${JSON.stringify(
+                normalizeToTabPath(targetPath || "/"),
+              )});
+            } catch (e) {}
+            true;
+          })();
+        `);
+      }
+
+      const requestId = `native_guard_${Date.now()}`;
+      if (nativeSheetCloseTimerRef.current) {
+        clearTimeout(nativeSheetCloseTimerRef.current);
+        nativeSheetCloseTimerRef.current = null;
+      }
+      nativeSheetMetaRef.current.set(requestId, { source: "native_guard" });
+      setNativeSheet({
+        requestId,
+        sheetKey: "login_required",
+        payload: {
+          title: "Авторизуйтесь",
+          description: authPromptDescription(targetPath || ""),
+          imageUrl: `${BASE_URL}/race.png`,
+          loginText: "Авторизоваться",
+        },
+        options: {},
+      });
+      setIsNativeSheetVisible(true);
+      navigateWebPath("/");
+
+      if (Platform.OS === "ios") {
+        let attempts = 0;
+        const tryGoHomeTab = () => {
+          attempts += 1;
+          try {
+            router.replace("/(tabs)");
+            return;
+          } catch {
+            if (attempts < 12) {
+              iosHomeRedirectTimerRef.current = setTimeout(tryGoHomeTab, 80);
+            }
+          }
+        };
+        if (iosHomeRedirectTimerRef.current) {
+          clearTimeout(iosHomeRedirectTimerRef.current);
+        }
+        iosHomeRedirectTimerRef.current = setTimeout(tryGoHomeTab, 0);
+      }
+    },
+    [navigateWebPath, router],
+  );
+
+  // Android: guard tab o'z HybridShell'ini render qiladi, shuning uchun bu yerda tekshiramiz.
+  // iOS: guard tab sahifalari (cart/favorites/profile) mount bo'lganda o'zlari redirect qiladi.
   useEffect(() => {
+    const targetPath = normalizeToTabPath(routePath || "/");
+    if (Platform.OS === "ios") return;
+    if (isLoggedIn) return;
+    if (!ROUTE_GUARD_PATHS.has(targetPath)) return;
+    openNativeAuthGuardSheet(targetPath);
+  }, [isLoggedIn, routePath, openNativeAuthGuardSheet]);
+
+  useEffect(() => {
+    if (!isLoggedIn) {
+      const targetPath = normalizeToTabPath(routePath || "/");
+      if (ROUTE_GUARD_PATHS.has(targetPath)) {
+        return;
+      }
+    }
     navigateWebPath(routePath);
-  }, [navigateWebPath, routePath]);
+  }, [isLoggedIn, navigateWebPath, routePath]);
 
   useEffect(() => {
     androidActiveTabIndexAnim.value = withTiming(activeAndroidTabIndex, {
@@ -474,15 +673,15 @@ export function HybridShell({ routePath = "/" }) {
   const goNativeTab = useCallback(
     (tabKey) => {
       Haptics.selectionAsync().catch(() => {});
+
       if (Platform.OS === "android") {
         if (
           !isLoggedIn &&
           (tabKey === "cart" || tabKey === "favorites" || tabKey === "profile")
         ) {
-          navigateWebPath("/login/phone");
+          openNativeAuthGuardSheet(`/${tabKey}`);
           return;
         }
-
         if (tabKey === "home") navigateWebPath("/");
         if (tabKey === "catalog") navigateWebPath("/catalog");
         if (tabKey === "cart") navigateWebPath("/cart");
@@ -497,12 +696,131 @@ export function HybridShell({ routePath = "/" }) {
       if (tabKey === "favorites") router.navigate("/(tabs)/favorites");
       if (tabKey === "profile") router.navigate("/(tabs)/profile");
     },
-    [isLoggedIn, navigateWebPath, router],
+    [isLoggedIn, navigateWebPath, openNativeAuthGuardSheet, router],
   );
 
   const openLogin = useCallback(() => {
+    const fallbackPath = normalizeToTabPath(routePath || "/");
+    const returnPath = ROUTE_GUARD_PATHS.has(fallbackPath) ? fallbackPath : "/";
+    if (Platform.OS === "ios") {
+      goToNativeLoginScreen(returnPath);
+      return;
+    }
+    authReturnPathRef.current = returnPath;
+    if (webViewRef.current) {
+      webViewRef.current.injectJavaScript(`
+        (function () {
+          try {
+            window.localStorage.setItem('lastPath', ${JSON.stringify(returnPath)});
+          } catch (e) {}
+          true;
+        })();
+      `);
+    }
+    setCurrentWebPath("/login/phone");
     navigateWebPath("/login/phone");
-  }, [navigateWebPath]);
+  }, [goToNativeLoginScreen, navigateWebPath, routePath]);
+
+  const emitToWeb = useCallback((eventName, detail) => {
+    if (!webViewRef.current) return;
+    const payload = JSON.stringify(detail || {});
+    webViewRef.current.injectJavaScript(`
+      (function () {
+        try {
+          window.dispatchEvent(new CustomEvent(${JSON.stringify(eventName)}, { detail: ${payload} }));
+        } catch (e) {}
+        true;
+      })();
+    `);
+  }, []);
+
+  const closeNativeSheet = useCallback(
+    ({ shouldNotify = true } = {}) => {
+      setIsNativeSheetVisible(false);
+      const requestId = nativeSheet?.requestId;
+      const meta = requestId ? nativeSheetMetaRef.current.get(requestId) : null;
+      if (nativeSheetCloseTimerRef.current) {
+        clearTimeout(nativeSheetCloseTimerRef.current);
+      }
+      nativeSheetCloseTimerRef.current = setTimeout(() => {
+        setNativeSheet(null);
+        if (requestId) {
+          nativeSheetMetaRef.current.delete(requestId);
+        }
+        nativeGuardOpenRef.current = false;
+        if (meta?.source === "native_guard") {
+          setTabBarForcedHidden(false);
+          if (Platform.OS === "ios") {
+            let attempts = 0;
+            const tryGoHomeTab = () => {
+              attempts += 1;
+              try {
+                router.replace("/(tabs)");
+                return;
+              } catch {
+                if (attempts < 12) {
+                  iosHomeRedirectTimerRef.current = setTimeout(
+                    tryGoHomeTab,
+                    80,
+                  );
+                }
+              }
+            };
+            if (iosHomeRedirectTimerRef.current) {
+              clearTimeout(iosHomeRedirectTimerRef.current);
+            }
+            iosHomeRedirectTimerRef.current = setTimeout(tryGoHomeTab, 0);
+          }
+          navigateWebPath("/");
+          return;
+        }
+        if (shouldNotify && requestId) {
+          emitToWeb(BOTTOM_SHEET_CLOSE_EVENT, { requestId });
+        }
+      }, NATIVE_SHEET_CLOSE_MS);
+    },
+    [emitToWeb, nativeSheet?.requestId, navigateWebPath, router],
+  );
+
+  const handleNativeSheetAction = useCallback(
+    (actionId, payload) => {
+      if (!nativeSheet?.requestId || !actionId) return;
+      const meta = nativeSheetMetaRef.current.get(nativeSheet.requestId);
+      if (meta?.source === "native_guard" && actionId === "login") {
+        setTabBarForcedHidden(false);
+        if (webViewRef.current) {
+          const target = authReturnPathRef.current;
+          webViewRef.current.injectJavaScript(`
+            (function () {
+              try {
+                window.localStorage.setItem('lastPath', ${JSON.stringify(
+                  target || "/",
+                )});
+              } catch (e) {}
+              true;
+            })();
+          `);
+        }
+        setIsNativeSheetVisible(false);
+        if (nativeSheetCloseTimerRef.current) {
+          clearTimeout(nativeSheetCloseTimerRef.current);
+        }
+        nativeSheetCloseTimerRef.current = setTimeout(() => {
+          nativeSheetMetaRef.current.delete(nativeSheet.requestId);
+          setNativeSheet(null);
+          nativeGuardOpenRef.current = false;
+          navigateWebPath("/login/phone");
+        }, NATIVE_SHEET_CLOSE_MS);
+        return;
+      }
+      emitToWeb(BOTTOM_SHEET_ACTION_EVENT, {
+        requestId: nativeSheet.requestId,
+        actionId,
+        payload: payload ?? null,
+      });
+    },
+    [emitToWeb, nativeSheet, navigateWebPath],
+  );
 
   const onMessage = useCallback(
     (event) => {
@@ -516,17 +834,73 @@ export function HybridShell({ routePath = "/" }) {
         return;
       }
 
+      if (message?.type === "OPEN_BOTTOM_SHEET") {
+        const incoming = message?.payload;
+        if (!incoming?.requestId || !incoming?.sheetKey) return;
+        if (incoming.sheetKey === "login_required" && !isLoggedIn) {
+          return;
+        }
+        if (nativeSheetCloseTimerRef.current) {
+          clearTimeout(nativeSheetCloseTimerRef.current);
+          nativeSheetCloseTimerRef.current = null;
+        }
+        setNativeSheet({
+          requestId: String(incoming.requestId),
+          sheetKey: String(incoming.sheetKey),
+          payload:
+            incoming?.payload && typeof incoming.payload === "object"
+              ? incoming.payload
+              : {},
+          options:
+            incoming?.options && typeof incoming.options === "object"
+              ? incoming.options
+              : {},
+        });
+        nativeSheetMetaRef.current.set(String(incoming.requestId), {
+          source: "web",
+        });
+        setIsNativeSheetVisible(true);
+        return;
+      }
+
+      if (message?.type === "CLOSE_BOTTOM_SHEET") {
+        const requestId = message?.payload?.requestId;
+        if (!requestId || requestId === nativeSheet?.requestId) {
+          closeNativeSheet({ shouldNotify: false });
+        }
+        return;
+      }
+
       if (message?.type === "authTokens") {
+        const loggedIn = Boolean(message?.tokens);
         setStoredAuthTokens(message?.tokens ?? null);
-        setIsLoggedIn(Boolean(message?.tokens));
+        setIsLoggedIn(loggedIn);
+        setAuthStateCache(loggedIn);
+        if (loggedIn) {
+          setTabBarForcedHidden(false);
+          const target = authReturnPathRef.current;
+          authReturnPathRef.current = null;
+          if (target && ROUTE_GUARD_PATHS.has(target)) {
+            navigateWebPath(target);
+            setCurrentWebPath(target);
+          }
+        }
         return;
       }
 
       if (message?.type === "AUTH_LOGIN") {
         const tokens = message?.payload;
         if (tokens && typeof tokens === "object") {
+          setTabBarForcedHidden(false);
           setStoredAuthTokens(JSON.stringify(tokens));
           setIsLoggedIn(true);
+          setAuthStateCache(true);
+          const target = authReturnPathRef.current;
+          authReturnPathRef.current = null;
+          if (target && ROUTE_GUARD_PATHS.has(target)) {
+            navigateWebPath(target);
+            setCurrentWebPath(target);
+          }
         }
         return;
       }
@@ -534,6 +908,7 @@ export function HybridShell({ routePath = "/" }) {
       if (message?.type === "AUTH_LOGOUT") {
         clearStoredAuthTokens();
         setIsLoggedIn(false);
+        setAuthStateCache(false);
         setWalletBalance(0);
         return;
       }
@@ -589,7 +964,13 @@ export function HybridShell({ routePath = "/" }) {
         }
       }
     },
-    [goNativeTab],
+    [
+      closeNativeSheet,
+      goNativeTab,
+      isLoggedIn,
+      nativeSheet?.requestId,
+      navigateWebPath,
+    ],
   );
 
   const androidItemWidth = useMemo(() => {
@@ -645,6 +1026,8 @@ export function HybridShell({ routePath = "/" }) {
           ref={webViewRef}
           source={{ uri: INITIAL_WEB_URL }}
           pullToRefreshEnabled
+          showsVerticalScrollIndicator={false}
+          showsHorizontalScrollIndicator={false}
           onMessage={onMessage}
           onLoadEnd={() => {
             setIsWebReady(true);
@@ -668,12 +1051,56 @@ export function HybridShell({ routePath = "/" }) {
           }}
           onNavigationStateChange={onNavigationStateChange}
           onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
+          onError={() => {
+            if (Platform.OS === "ios") {
+              webViewRef.current?.reload();
+            }
+          }}
+          onHttpError={() => {
+            if (Platform.OS === "ios") {
+              webViewRef.current?.reload();
+            }
+          }}
+          onContentProcessDidTerminate={() => {
+            webViewRef.current?.reload();
+          }}
+          onRenderProcessGone={() => {
+            if (Platform.OS === "android") {
+              webViewRef.current?.reload();
+            }
+          }}
           injectedJavaScriptBeforeContentLoaded={bridgeScript}
           injectedJavaScript={DISABLE_ZOOM_SCRIPT}
           scalesPageToFit={false}
           setSupportMultipleWindows={false}
         />
+        {shouldShowInlineAuthGuard ? (
+          <View style={styles.inlineGuardOverlay}>
+            <View style={styles.inlineGuardCard}>
+              <Image
+                source={{ uri: `${BASE_URL}/race.png` }}
+                style={styles.inlineGuardImage}
+                resizeMode="contain"
+              />
+              <Text style={styles.inlineGuardTitle}>Авторизуйтесь</Text>
+              <Text style={styles.inlineGuardText}>
+                {authPromptDescription(routePath || "/")}
+              </Text>
+              <Pressable style={styles.inlineGuardButton} onPress={openLogin}>
+                <Text style={styles.inlineGuardButtonText}>Авторизоваться</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
       </View>
+
+      <NativeBottomSheet
+        mounted={Boolean(nativeSheet)}
+        visible={isNativeSheetVisible}
+        sheet={nativeSheet}
+        onClose={() => closeNativeSheet()}
+        onAction={handleNativeSheetAction}
+      />
 
       {showAndroidTabBar ? (
         <View style={styles.androidTabBarWrap}>
@@ -713,6 +1140,54 @@ const styles = StyleSheet.create({
   },
   webviewWrap: {
     flex: 1,
+  },
+  inlineGuardOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "#fff",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 20,
+  },
+  inlineGuardCard: {
+    width: "100%",
+    maxWidth: 360,
+    borderRadius: 28,
+    // backgroundColor: "#F7F7F8",
+    paddingHorizontal: 20,
+    paddingVertical: 24,
+    alignItems: "center",
+  },
+  inlineGuardImage: {
+    width: 180,
+    height: 140,
+    marginBottom: 16,
+  },
+  inlineGuardTitle: {
+    fontSize: 24,
+    lineHeight: 28,
+    fontWeight: "700",
+    color: "#131314",
+    textAlign: "center",
+  },
+  inlineGuardText: {
+    marginTop: 10,
+    fontSize: 15,
+    lineHeight: 21,
+    color: "#58595E",
+    textAlign: "center",
+  },
+  inlineGuardButton: {
+    marginTop: 18,
+    borderRadius: 58,
+    backgroundColor: "#FE946E",
+    paddingHorizontal: 22,
+    paddingVertical: 11,
+  },
+  inlineGuardButtonText: {
+    color: "#fff",
+    fontSize: 15,
+    lineHeight: 18,
+    fontWeight: "600",
   },
   header: {
     height: 64,

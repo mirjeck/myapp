@@ -8,12 +8,21 @@ import {
 import { WebView } from "react-native-webview";
 
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { openBrowserAsync } from "expo-web-browser";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { setStoredAuthTokens } from "@/lib/auth-storage";
+import { setAuthStateCache } from "@/lib/auth-guard-bridge";
 
 const ONBOARDING_PHONE_URL = "http://192.168.68.127:80/";
 const WEBVIEW_URL = process.env.EXPO_PUBLIC_WEB_URL || ONBOARDING_PHONE_URL;
+const LOGIN_WEBVIEW_URL = (() => {
+  try {
+    return new URL("/login/phone", WEBVIEW_URL).toString();
+  } catch {
+    return WEBVIEW_URL;
+  }
+})();
 
 // Zoom o'chirish uchun viewport meta tag
 const DISABLE_ZOOM_SCRIPT = `
@@ -76,13 +85,34 @@ function normalizeUrl(url) {
   }
 }
 
+function normalizeNextPath(next) {
+  const raw = Array.isArray(next) ? next[0] : next;
+  if (typeof raw !== "string" || !raw.startsWith("/")) return "/";
+  if (raw.startsWith("/cart")) return "/cart";
+  if (raw.startsWith("/favorites")) return "/favorites";
+  if (raw.startsWith("/profile")) return "/profile";
+  if (raw.startsWith("/catalog")) return "/catalog";
+  return "/";
+}
+
+function toNativeTabsPath(pathname) {
+  if (pathname === "/catalog") return "/(tabs)/catalog";
+  if (pathname === "/cart") return "/(tabs)/cart";
+  if (pathname === "/favorites") return "/(tabs)/favorites";
+  if (pathname === "/profile") return "/(tabs)/profile";
+  return "/(tabs)";
+}
+
 export default function OnboardingPhoneScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams();
   const navigation = useNavigation();
   const webViewRef = useRef(null);
+  const redirectedRef = useRef(false);
+  const nextPath = useMemo(() => normalizeNextPath(params?.next), [params?.next]);
   const [navState, setNavState] = useState({
     canGoBack: false,
-    url: WEBVIEW_URL,
+    url: LOGIN_WEBVIEW_URL,
   });
 
   const normalizedHomeUrl = useMemo(() => normalizeUrl(WEBVIEW_URL), []);
@@ -159,9 +189,28 @@ export default function OnboardingPhoneScreen() {
     <SafeAreaView style={{ flex: 1, backgroundColor: "#fff" }}>
       <WebView
         ref={webViewRef}
-        source={{ uri: WEBVIEW_URL }}
+        source={{ uri: LOGIN_WEBVIEW_URL }}
         onNavigationStateChange={onNavigationStateChange}
         onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
+        onMessage={(event) => {
+          const raw = event?.nativeEvent?.data;
+          if (!raw || redirectedRef.current) return;
+
+          let message;
+          try {
+            message = JSON.parse(raw);
+          } catch {
+            return;
+          }
+
+          if (message?.type !== "authTokens") return;
+          if (!message?.tokens) return;
+
+          redirectedRef.current = true;
+          setStoredAuthTokens(message.tokens);
+          setAuthStateCache(true);
+          router.replace(toNativeTabsPath(nextPath));
+        }}
         injectedJavaScriptBeforeContentLoaded={WEBVIEW_BRIDGE_SCRIPT}
         injectedJavaScript={DISABLE_ZOOM_SCRIPT}
         scalesPageToFit={false}

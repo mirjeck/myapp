@@ -6,7 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/images/logo.jpg",
     "scheme": "myapp",
-    "userInterfaceStyle": "automatic",
+    "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "ios": {
       "bundleIdentifier": "uz.miobeauty.webview",
@@ -14,7 +14,8 @@
       "supportsTablet": true,
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
-      }
+      },
+      "userInterfaceStyle": "light"
     },
     "android": {
       "package": "uz.miobeauty.webview",
@@ -40,7 +41,7 @@
           "resizeMode": "contain",
           "backgroundColor": "#ffffff",
           "dark": {
-            "backgroundColor": "#000000"
+            "backgroundColor": "#ffffff"
           }
         }
       ]
