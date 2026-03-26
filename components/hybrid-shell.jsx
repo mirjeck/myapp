@@ -27,6 +27,7 @@ import {
   getStoredAuthTokens,
   setStoredAuthTokens,
 } from "@/lib/auth-storage";
+import { shouldShowTabBarForPath } from "@/lib/tab-bar-visibility";
 
 const BASE_URL = (
   process.env.EXPO_PUBLIC_WEB_URL || "http://192.168.68.127:80"
@@ -354,7 +355,10 @@ export function HybridShell({ routePath = "/" }) {
     () => startsWithAny(currentPath, HEADER_VISIBLE_PATHS),
     [currentPath],
   );
-  const showAndroidTabBar = Platform.OS === "android";
+  const showBottomTabBar = useMemo(
+    () => shouldShowTabBarForPath(currentPath),
+    [currentPath],
+  );
   const activeAndroidTabIndex = useMemo(() => {
     const foundIndex = ANDROID_TAB_ITEMS.findIndex((tab) =>
       isTabActive(currentPath, tab),
@@ -665,7 +669,7 @@ export function HybridShell({ routePath = "/" }) {
         />
       </View>
 
-      {showAndroidTabBar ? (
+      {showBottomTabBar ? (
         <View style={styles.androidTabBarWrap}>
           <View
             style={styles.androidTabBar}
@@ -763,17 +767,22 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   androidTabBarWrap: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 24,
+    zIndex: 20,
     paddingHorizontal: 12,
     paddingTop: 8,
     paddingBottom: 8,
-    backgroundColor: "#fff",
+    backgroundColor: "transparent",
   },
   androidTabBar: {
     position: "relative",
     height: 66,
     borderRadius: 999,
     overflow: "hidden",
-    backgroundColor: "rgba(255,255,255,0.78)",
+    backgroundColor: "rgba(255,255,255,0.90)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.92)",
     shadowColor: "#000",
